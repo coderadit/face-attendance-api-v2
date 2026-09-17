@@ -4,6 +4,4 @@ python-multipart
 pillow
 numpy<2
 opencv-python-headless
-insightface
-onnxruntime
 psycopg2-binary
