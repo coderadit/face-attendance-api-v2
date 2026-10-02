@@ -36,7 +36,9 @@ import os
 import re
 import urllib.request
 import uuid
+import zipfile
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -410,6 +412,87 @@ async def recognize(file: UploadFile = File(...)):
         "time": time_str,
         "status": "Present",
         "message": "Attendance already marked for today" if already_marked else "Attendance marked successfully",
+    }
+
+
+@app.post("/register/bulk")
+async def register_bulk(file: UploadFile = File(...)):
+    """
+    Enroll many people at once from a single ZIP file of CONSENTED photos.
+
+    Preferred structure — one folder per person, folder name = their name,
+    containing one or more clear face photos of them:
+        dataset.zip
+          Aditi Sharma/
+            photo1.jpg
+            photo2.jpg
+          Rahul Verma/
+            photo1.jpg
+
+    A flat zip also works (one photo per person, filename = their name):
+        dataset.zip
+          Aditi Sharma.jpg
+          Rahul Verma.jpg
+
+    If a person has multiple photos, their embeddings are averaged for a
+    more robust match. Photos with zero or multiple faces are skipped and
+    reported back, not silently ignored.
+    """
+    raw = await file.read()
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        return {"success": False, "message": "That file isn't a valid .zip archive"}
+
+    groups: dict[str, list[bytes]] = {}
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        lower = info.filename.lower()
+        if not lower.endswith((".jpg", ".jpeg", ".png")):
+            continue
+        parts = Path(info.filename).parts
+        if any(p.startswith("__MACOSX") or p.startswith(".") for p in parts):
+            continue
+        person = parts[0] if len(parts) >= 2 else Path(info.filename).stem
+        person = person.strip()
+        if not person:
+            continue
+        groups.setdefault(person, []).append(zf.read(info))
+
+    if not groups:
+        return {"success": False, "message": "No image files found in the zip (expected .jpg/.jpeg/.png)"}
+
+    registered, skipped = [], []
+
+    for person, images in groups.items():
+        embeddings = []
+        for raw_img in images:
+            try:
+                img = load_image(raw_img)
+            except Exception:
+                continue
+            faces = detect_faces(img)
+            n = 0 if faces is None else len(faces)
+            if n != 1:
+                continue
+            embeddings.append(embed_face(img, faces[0]))
+
+        if not embeddings:
+            skipped.append({"name": person, "reason": "No photo with exactly one detectable face"})
+            continue
+
+        avg_embedding = np.mean(np.stack(embeddings), axis=0).astype(np.float32)
+        student_id = generate_student_id(person)
+        save_student(student_id, person, avg_embedding)
+        registered.append({"student_id": student_id, "name": person, "photos_used": len(embeddings)})
+
+    return {
+        "success": True,
+        "registered_count": len(registered),
+        "skipped_count": len(skipped),
+        "registered": registered,
+        "skipped": skipped,
     }
 
 
