@@ -62,7 +62,14 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 DATABASE_URL = os.environ.get("DATABASE_URL")  # set this in Render's dashboard (Neon connection string)
 IST = timezone(timedelta(hours=5, minutes=30))
-MATCH_THRESHOLD = 0.363  # SFace's published cosine-similarity match threshold
+
+# SFace's published default is 0.363, but that's tuned for general face
+# verification, not for telling apart people who look alike (e.g. siblings).
+# 0.5 is a stricter starting point; raise it further if false matches keep
+# happening, lower it if legitimate matches start getting rejected. You can
+# tune this live on Render (Environment tab -> MATCH_THRESHOLD) without
+# touching code or redeploying.
+MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.5"))
 MAX_DIM = 640
 
 MODELS_DIR = "/tmp/models"
@@ -396,7 +403,13 @@ async def recognize(file: UploadFile = File(...)):
             best_score, best_id = score, sid
 
     if best_score < MATCH_THRESHOLD:
-        return {"success": True, "matched": False, "message": "Face not recognized"}
+        return {
+            "success": True,
+            "matched": False,
+            "message": "Face not recognized",
+            "closest_similarity": round(best_score, 3),  # for tuning MATCH_THRESHOLD; not shown in the UI
+            "threshold": MATCH_THRESHOLD,
+        }
 
     name = STUDENTS[best_id]["name"]
     already_marked, date_str, time_str = mark_attendance(best_id, best_score)
